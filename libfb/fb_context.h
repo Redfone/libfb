@@ -1,0 +1,51 @@
+ /** 
+  *  libfb - foneBRIDGE library
+  *  (C) 2005-2008 Redfone Communications, LLC.
+  *  www.red-fone.com
+  *
+  *  @file fb_context.h
+  *  @author Brett Carrington <brettcar@gmail.com>
+  *  @brief libfb context data structure
+  */
+
+/** @struct libfb_context
+ *  @brief the internal context structure 
+ *
+ * The context structure represents the internal state of the libfb
+ * library with respect to a single device. Each device manipulated
+ * with libfb is associated with such a context data structure. 
+ *
+ *  This structure is meant to be completely opaque and managed by the
+ *  internal functions of libfb. Most functions of libfb will require
+ *  a pointer (using the typedef libfb_t) to one of these context
+ *  structures.
+ */
+typedef struct libfb_context
+{
+  int udp_socket;		/**< a socket() for UDP communications */
+  int connected;		/**< the socket is connected */
+  int crc_en;			/**< CRC checking enabled? */
+
+  /** Flash reference time */
+  time_t ref_ctime;
+  /** SYSID timestamp */
+  time_t sysid_ctime;
+
+  /* RAW Ethernet support */
+  /** enable the use of RAW ethernet transmission/reception via libnet */
+# define LIBFB_ETHERNET_ON  1
+  /** disable the use of RAW ethernet transmission/reception via libnet */
+# define LIBFB_ETHERNET_OFF 0
+  int ether_on;                 /**< true if raw ethernet enabled */
+  char *device;			/**< the name of our network device */
+  u_int8_t *s_mac;		/**< the local (source) MAC address */
+  libnet_t *l;			/**< a libnet context */
+  pcap_t *p;			/**< a libpcap context */
+} libfb_t;
+
+/** The maximum length of an error that LIBFB will write to a memory/callback location */
+#if LIBNET_ERRBUF_SIZE
+# define LIBFB_ERRBUF_SIZE LIBNET_ERRBUF_SIZE
+#else
+# define LIBFB_ERRBUF_SIZE 128
+#endif

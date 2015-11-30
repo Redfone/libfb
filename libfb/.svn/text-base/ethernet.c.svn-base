@@ -1,0 +1,341 @@
+#include <libfb/fb_lib.h>
+
+#ifdef HAVE_SYS_IOCTL_H
+# include <sys/ioctl.h>
+#endif
+
+#ifdef HAVE_NETPACKET_PACKET_H
+# include <netpacket/packet.h>
+#endif
+
+#ifdef HAVE_NET_ETHERNET_H
+# include <net/ethernet.h>
+#endif
+
+#ifdef HAVE_NET_IF_H
+# include <net/if.h>
+#endif
+
+#ifdef HAVE_TIME_H
+# include <time.h>
+#endif
+
+#ifdef HAVE_STDLIB_H
+# include <stdlib.h>
+#endif
+
+/** @file ethernet.c
+ * 
+ * @brief Raw Ethernet support functions 
+ */
+
+static int doof_check_crc (DOOF * packet);
+static unsigned short doof_crc (DOOF * packet);
+
+/** @brief Transmit a raw ethernet DOOF packet 
+ *
+ * The DOOF header is properly appended in front of the specified buf
+ * (payload).
+ *
+ * @param f the device context
+ * @param dst_mac destination MAC address
+ * @param buf data buffer, of length buflen
+ * @param buflen the length of buf
+ * @param cmd the firmware DOOF command to send
+ * @param param optional parameters to the DOOF command 
+ * @return error code if applicable
+ */
+fblib_err
+send_doof (libfb_t * f, u_int8_t * dst_mac, u_int8_t * buf, u_int16_t buflen,
+	   u_int8_t cmd, u_int8_t param)
+{
+  u_int32_t full_len = sizeof (DOOF) + buflen;
+  u_int16_t crc;
+  u_int8_t *frame;
+  DOOF doof;
+  DOOF *doofptr;
+  fblib_err retval;
+
+#ifdef DEBUG
+  fprintf (stderr, "{send_doof: buflen(%d) full_len(%d)}\n", buflen,
+	   full_len);
+#endif
+
+  frame = malloc (full_len);
+  if (frame == NULL)
+    return FBLIB_EERRNO;
+
+  memset (frame, 0, full_len);
+
+  doof.cmd = cmd;
+  doof.param = param;
+  doof.len = buflen & 0xFFFF;
+
+  memcpy (frame, &doof, sizeof (DOOF));
+  memcpy (frame + sizeof (DOOF), buf, buflen);
+
+  doofptr = (DOOF *) frame;
+  crc = doof_crc (doofptr);
+  doofptr->crc = crc & 0xFFFF;
+
+  retval = send_ethernet (f, dst_mac, frame, full_len);
+  free (frame);
+  return retval;
+}
+
+
+/** @brief transmit a raw ethernet packet 
+ *
+ * @param f the device context
+ * @param dst_mac the destination MAC address
+ * @param payload arbitrary Ethernet payload data 
+ * @param len the length of the payload
+ * @return error value if applicable
+ */
+fblib_err
+send_ethernet (libfb_t * f, u_int8_t * dst_mac, u_int8_t * payload,
+	       u_int32_t len)
+{
+  libnet_ptag_t dtag, etag;
+  const u_int16_t proto = 0xD00F;	/* libnet runs htons for us */
+  int ret;
+
+#ifdef DEBUG
+  fprintf (stderr, "{send_ethernet: len(%d)}\n", len);
+#endif
+
+  memset (&etag, 0, sizeof (libnet_ptag_t));
+  memset (&dtag, 0, sizeof (libnet_ptag_t));
+
+  dtag = libnet_build_data (payload, len, f->l, 0);
+  if (dtag == -1)
+    {
+      fprintf (stderr, "libnet_build_data(): %s\n", libnet_geterror (f->l));
+      return FBLIB_EEXTLIB;
+    }
+  etag = libnet_build_ethernet (dst_mac, f->s_mac, proto, NULL, 0, f->l, 0);
+
+  if (etag == -1)
+    {
+      fprintf (stderr, "libnet_build_ethernet(): %s\n",
+	       libnet_geterror (f->l));
+      return FBLIB_EEXTLIB;
+    }
+
+  ret = libnet_write (f->l);
+  if (ret == -1)
+    {
+      fprintf (stderr, "libnet_write(): %s\n", libnet_geterror (f->l));
+      return FBLIB_EEXTLIB;
+    }
+
+  libnet_clear_packet (f->l);
+
+  return FBLIB_ESUCCESS;
+}
+
+
+/** @brief Receive the next raw ethernet packet from the pcap library 
+ *
+ * @param f the device context
+ * @param buffer pointer to a location to store the buffer
+ * @return the data length
+ */
+int
+recv_packet (libfb_t * f, u_int8_t * buffer)
+{
+  const u_char *packet;
+  struct pcap_pkthdr header;
+
+  packet = pcap_next (f->p, &header);
+  memcpy (buffer, packet, header.len);
+
+  return header.len;
+}
+
+/** @brief receive the next raw ethernet doof packet
+ * 
+ * The DOOF packet's CRC16 is checked and any errors are reported.
+ *
+ * @param f the device context
+ * @param buffer the buffer to store the received data in
+ * @return the received data length or a value less than 0 if an error occured (usually a CRC check failure)
+ */
+uint16_t
+recv_doof (libfb_t * f, u_int8_t * buffer)
+{
+  int ret;
+  DOOF *doof_ptr;
+
+  recv_packet (f, buffer);
+
+  doof_ptr = (DOOF *) (buffer + 14);
+  ret = doof_check_crc (doof_ptr);
+
+  if ((ret < 0) && f->crc_en)
+    {
+      return ret;
+    }
+
+#if 0
+  if (doof_ptr->cmd)
+    return -DOOF_RESP_BADPARM;
+#endif
+
+  /* Return the length */
+  return doof_ptr->len;
+}
+
+
+/** @brief Send a raw ethernet DOOF packet and wait for reply
+ *
+ * Sends a 0xd00f packet, however, waits for a reply (by blocking) and
+ * returns the packet in recv_buf (similar to doof_rx_packet). Returns
+ * the length of the 0xD00F payload
+ *
+ * @param f the device context
+ * @param dstmac the destination mac
+ * @param packet the DOOF payload, the header is added by this function
+ * @param cmd the DOOF command
+ * @param param optional parameters to the DOOF command
+ * @param len the DOOF payload length
+ * @param recv_buf pointer to a memory location to receive the reply
+ * @return the reply length in bytes or a value less than 0 if an error occurs
+ */
+int
+doof_txrx (libfb_t * f, u_int8_t * dstmac, u_int8_t * packet, u_int8_t cmd,
+	   u_int8_t param, u_int16_t len, u_int8_t * recv_buf)
+{
+  int res;
+
+#ifdef DEBUG
+  fprintf (stderr, "{doof_txrx: cmd(%d) param(%d) len(%d)}\n", cmd, param,
+	   len);
+#endif
+  res = send_doof (f, dstmac, packet, len, cmd, param);
+
+  /* Hmm, but if we're expecting a length...? */
+  if (res != FBLIB_ESUCCESS)
+    return res;
+
+
+  /* Receive reply */
+  res = recv_doof (f, recv_buf);
+#ifdef DEBUG
+  fprintf (stderr, "\n{Response is %d}\n", res);
+#endif
+  if (res == -DOOF_RESP_BADPARM)
+    {
+      fprintf (stderr, "Failed parameter check!\n");
+      return -DOOF_RESP_BADPARM;
+    }
+
+  /* Check CRC if enabled */
+  if ((res < 0) && f->crc_en)
+    {
+      fprintf (stderr, "Failed CRC on received packet\n");
+      return -DOOF_RESP_CRCFAIL;
+    }
+
+  return res;
+}
+
+
+/** @brief Configure a device using spam_mode masks
+ *  @deprecated Raw ethernet configuration is no longer used
+ */
+fblib_err
+config_fb (libfb_t * f, unsigned char *span_mode, unsigned char *dest_mac,
+	   unsigned char fb_mac[][6])
+{
+  int len, span;
+  fblib_err retval;
+  DOOF_CFG *config_packet = malloc (sizeof (DOOF_CFG));
+
+  memset ((void *) config_packet, 0, sizeof (DOOF_CFG));
+
+  for (span = 0; span < IDT_LINKS; span++)
+    {
+      if (span_mode[span] & SPAN_MODE_E1)
+	config_packet->E1 |= (1 << span);
+      if (span_mode[span] & SPAN_MODE_ESF)
+	config_packet->ESF |= (1 << span);
+      if (span_mode[span] & SPAN_MODE_AMI)
+	config_packet->AMI |= (1 << span);
+      if (span_mode[span] & SPAN_MODE_RBS)
+	config_packet->RBS |= (1 << span);
+      if (span_mode[span] & SPAN_MODE_CRCMF)
+	config_packet->CRCMF |= (1 << span);
+
+      memcpy ((void *) config_packet->mac[span], fb_mac[span], 6);
+    }
+
+  len = sizeof (DOOF_CFG);
+
+  /* Set number of spans to 4 by default */
+  config_packet->numSpan = 4;
+
+  retval =
+    send_doof (f, dest_mac, (u_int8_t *) config_packet, len,
+	       DOOF_CMD_RECONFIG, 0);
+  free ((void *) config_packet);
+
+  return retval;
+}
+
+/** @brief Disable all spans 
+ * @deprecated Raw ethernet configuration is no longer used
+ */
+fblib_err
+config_fb_allspan_off (libfb_t * f, unsigned char *dest_mac)
+{
+  unsigned char mac[4][6];
+  unsigned char span_mode[IDT_LINKS];
+
+  memset (mac, 0xff, 4 * 6);
+  memset (span_mode, 0, IDT_LINKS);
+
+  return config_fb (f, span_mode, dest_mac, mac);
+}
+
+/** @brief Zero out and calculate CRC16 
+ *
+ *  Zero's out the CRC in the packet and returns the CRC calculated
+ *  over the DOOF segment.  Expects the len field in the packet to be
+ *  set.
+ *
+ *  @param packet Location of the DOOF packet to operate on
+ *  @return the calculated CRC16 value
+ */
+static uint16_t
+doof_crc (DOOF * packet)
+{
+  uint16_t len = packet->len;
+  /* Zero out the CRC */
+  packet->crc = 0;
+
+#ifdef DEBUG
+  fprintf (stderr, "{doof_crc: total_len(%ld) packet_len(%d)}\n",
+	   sizeof (DOOF) + len, len);
+#endif
+
+  /* Calculate CRC over whole DOOF header and payload */
+  return crc_16 (((unsigned char *) packet), sizeof (DOOF) + len);
+}
+
+/** @brief Computes and compares the CRC stored in a packet 
+ *  @param packet the packet to check the CRC for
+ *  @return 0 if successful, or -DOOF_RESP_CRCFAIL if failure
+ */
+static int
+doof_check_crc (DOOF * packet)
+{
+  uint16_t crc, crcrx;
+  /* Save the received CRC for comparison */
+  crcrx = packet->crc;
+
+  crc = doof_crc (packet);
+  if (crc == crcrx)
+    return 0;
+  return -DOOF_RESP_CRCFAIL;
+}

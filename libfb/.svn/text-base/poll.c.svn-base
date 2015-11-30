@@ -1,0 +1,87 @@
+#include <libfb/fb_lib.h>
+
+#ifdef HAVE_POLL_H
+# include <poll.h>
+#endif
+
+/** @file poll.c
+ *  @author Brett Carrington
+ *
+ *  @brief Helper functions for polling UDP sockets
+ */
+
+
+/** @brief Block until UDP socket is ready for specific events
+ *
+ * @param f the device context
+ * @param events the events to poll for
+ * @param timeout give up after length `timeout' in seconds
+ * @return true if at least one event is ready, or false is timed out
+ */
+static bool
+udp_ready_timeout (libfb_t * f, short events, int timeout)
+{
+  struct pollfd sock = { f->udp_socket, events, timeout };
+  int ret;
+
+  ret = poll (&sock, 1, timeout * 1e3);
+
+  if (ret == 1 && sock.revents & events)
+    return true;
+
+  if (ret < 0)
+    perror ("poll");
+
+  return false;
+}
+
+/** @brief Check if UDP socket is ready for an event, no blocking
+ *  @param f the device context
+ *  @param events the events to check for
+ *  @return true if at least one of the events is ready, false otherwise
+ */
+static bool
+udp_ready (libfb_t * f, short events)
+{
+  return udp_ready_timeout (f, events, 0);
+}
+
+/** @brief Check if UDP socket has data waiting to be read
+ * 
+ *  @param f the device context
+ *  @return true if the socket has data waiting to be ready
+ */
+bool
+udp_ready_read (libfb_t * f)
+{
+  return udp_ready (f, POLLIN);
+}
+
+/** @brief Check if UDP socket will permit a write without blocking
+ * 
+ *  @param f the device context
+ *  @return true if the socket will not block on write
+ */
+bool
+udp_ready_write (libfb_t * f)
+{
+  return udp_ready (f, POLLOUT);
+}
+
+/** @brief Block until a new packet is received on the UDP socket
+ * 
+ *  @param f the device context @return FBLIB_ETIMEDOUT if the polling
+ *  times out before a packet is received, FBLIB_ESUCCESS otherwise
+ */
+fblib_err
+poll_for_newpkt (libfb_t * f)
+{
+  bool pkt_waiting = false;
+
+  pkt_waiting = udp_ready_timeout (f, POLLIN, FBLIB_POLLTIMEOUT);
+
+  if (!pkt_waiting)
+    return FBLIB_ETIMEDOUT;
+
+  return FBLIB_ESUCCESS;
+}
